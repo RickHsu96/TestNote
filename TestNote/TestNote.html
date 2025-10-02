@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>My Cloud Notes (MVP)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto; margin: 0; }
+    header { padding: 12px 16px; border-bottom: 1px solid #eee; display:flex; gap:12px; align-items:center; }
+    main { max-width: 900px; margin: 0 auto; padding: 16px; }
+    textarea { width: 100%; min-height: 60vh; font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .hint { color:#666; font-size:13px; }
+    .badge { padding:2px 6px; border:1px solid #ddd; border-radius:6px; font-size:12px; }
+    button { padding: 8px 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>My Cloud Notes (MVP)</strong>
+    <span id="status" class="badge">未連線</span>
+    <span class="hint">目前僅支援電腦、不可離線；內容會自動同步到雲端。</span>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button id="exportBtn">下載備份</button>
+      <input id="importInput" type="file" accept="application/json" style="display:none" />
+      <button id="importBtn">上傳還原</button>
+    </div>
+  </header>
+
+  <main>
+    <label class="hint">這份文件的本機 ID：<code id="docId"></code></label>
+    <textarea id="editor" placeholder="開始在這裡輸入你的筆記……"></textarea>
+    <p class="hint" id="saveHint"></p>
+  </main>
+
+  <script type="module">
+    // 1) 連到 Supabase —— 換成你的專案資訊
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+    const SUPABASE_URL = 'https://mrcoorhufrhjdgpyllyy.supabase.co';   // ← 改這個
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1yY29vcmh1ZnJoamRncHlsbHl5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkzMzQ0NjUsImV4cCI6MjA3NDkxMDQ2NX0.2Ni2pVQ88EHnguQOgLrl3zWLU4IJC8pnhzREg2c5OiI';                 // ← 還有這個
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const STATUS = document.getElementById('status');
+    const SAVEHINT = document.getElementById('saveHint');
+    const EDITOR = document.getElementById('editor');
+
+    // 2) 這台裝置的「文件代號」—— 存在 localStorage
+    const DOC_ID_KEY = 'cloudnote_doc_id';
+    let DOC_ID = localStorage.getItem(DOC_ID_KEY);
+    if (!DOC_ID) { DOC_ID = crypto.randomUUID(); localStorage.setItem(DOC_ID_KEY, DOC_ID); }
+    document.getElementById('docId').textContent = DOC_ID;
+
+    // 3) 本機快取用的 key（可沿用你原本的）
+    const LOCAL_KEY = 'quicknote_messages_v1'; // 如果你有自己的 key，換它
+
+    // 4) UI 小工具
+    function setStatus(text) { STATUS.textContent = text; }
+    function setSavedHint(t) { SAVEHINT.textContent = t; }
+
+    // 5) 雲端載入
+    async function cloudLoad() {
+      try {
+        setStatus('載入中…');
+        const { data, error } = await supabase
+          .from('notes')
+          .select('content')
+          .eq('id', DOC_ID)
+          .maybeSingle();
+        if (error) throw error;
+        setStatus('已連線');
+        return data?.content ?? null;
+      } catch (e) {
+        console.warn('cloudLoad error', e);
+        setStatus('離線/連線失敗');
+        return null;
+      }
+    }
+
+    // 6) 雲端儲存（整包 JSON）
+    async function cloudSave(contentObj) {
+      try {
+        const payload = { id: DOC_ID, content: contentObj, updated_at: new Date().toISOString() };
+        const { error } = await supabase.from('notes').upsert(payload);
+        if (error) throw error;
+        setSavedHint('已儲存到雲端：' + new Date().toLocaleTimeString());
+        setStatus('已連線');
+      } catch (e) {
+        console.warn('cloudSave error', e);
+        setStatus('離線/連線失敗');
+      }
+    }
+
+    // 7) 「停 1 秒再存」避免每個字都打擾雲端
+    let saveTimer = null;
+    function scheduleCloudSave(obj) {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => cloudSave(obj), 1000);
+    }
+
+    // 8) 啟動流程：先試雲端 → 不行用本機
+    (async () => {
+      const cloud = await cloudLoad();
+      if (cloud && cloud.text != null) {
+        // 你的資料結構：這裡假設是一個 { text: "整份內容" } 的 JSON
+        EDITOR.value = cloud.text;
+        localStorage.setItem(LOCAL_KEY, JSON.stringify(cloud));
+      } else {
+        const local = localStorage.getItem(LOCAL_KEY);
+        const obj = local ? JSON.parse(local) : { text: '' };
+        EDITOR.value = obj.text || '';
+      }
+    })();
+
+    // 9) 編輯時：本機先存、雲端排程存
+    EDITOR.addEventListener('input', () => {
+      const obj = { text: EDITOR.value };
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(obj));
+      setSavedHint('準備儲存中…');
+      scheduleCloudSave(obj);
+    });
+
+    // 10) 關頁面前再補存一次
+    window.addEventListener('beforeunload', () => {
+      const local = localStorage.getItem(LOCAL_KEY);
+      if (local) { try { cloudSave(JSON.parse(local)); } catch {} }
+    });
+
+    // 11) 下載備份 / 上傳還原
+    document.getElementById('exportBtn').onclick = () => {
+      const content = localStorage.getItem(LOCAL_KEY) ?? '{"text":""}';
+      const blob = new Blob([content], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'my-notes-backup.json';
+      a.click();
+    };
+    document.getElementById('importBtn').onclick = () => document.getElementById('importInput').click();
+    document.getElementById('importInput').onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      localStorage.setItem(LOCAL_KEY, text);
+      const obj = JSON.parse(text);
+      EDITOR.value = obj.text || '';
+      scheduleCloudSave(obj); // 匯入後也同步到雲端
+    };
+  </script>
+</body>
+</html>
